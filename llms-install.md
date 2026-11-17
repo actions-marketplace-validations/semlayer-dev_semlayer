@@ -36,13 +36,18 @@ Do not hand-edit the JSON. semlayer writes it:
 
 ```bash
 semlayer client list            # which clients are on this machine
-semlayer client add claude-code # or claude-desktop, cursor, cline, vscode
+semlayer client add claude-code # or claude-desktop, cursor, cline, vscode, codex
 ```
 
 That records an absolute command path, keeps the arguments separate, merges
 into `mcpServers` without disturbing any other server, and refuses rather
 than overwrites a file that is not valid JSON. Pass `--dry-run` first if you
 want to show the user the change before making it.
+
+`codex` is the exception to the shape, not to the command: it writes a
+`[mcp_servers.semlayer]` table in `~/.codex/config.toml`, edited in place so
+the file's comments and other settings survive. That one file is also read by
+the Codex IDE extension and the ChatGPT desktop app.
 
 For a client it does not know, write this shape yourself — and note the
 command must be an ABSOLUTE path (`which semlayer`, usually

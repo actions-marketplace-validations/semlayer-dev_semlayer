@@ -354,8 +354,7 @@ def _cmd_client(args: argparse.Namespace) -> int:
     if args.client_command == "list":
         rows = [{"id": c.id, "label": c.label, "path": str(c.path),
                  "config_found": c.exists,
-                 "configured": "semlayer" in (mi.read_config(c.path).get(c.key) or {})
-                 if c.exists else False}
+                 "configured": mi.configured(c)}
                 for c in mi.clients()]
         if args.json:
             print(json.dumps(rows, indent=1))
@@ -372,7 +371,10 @@ def _cmd_client(args: argparse.Namespace) -> int:
     result = (mi.plan if args.dry_run else mi.apply)(client, args.layer, args.cli)
 
     if args.json:
-        out = {k: v for k, v in result.items() if k != "merged"}
+        # `merged` and `rendered` are the user's whole config file. Naming
+        # the entry is the point; echoing everything else they have
+        # configured, into a log or an agent's transcript, is not.
+        out = {k: v for k, v in result.items() if k not in ("merged", "rendered")}
         out["dry_run"] = bool(args.dry_run)
         out["restart"] = mi.RESTART_NOTE
         if mi.warning_for(client):
@@ -384,7 +386,8 @@ def _cmd_client(args: argparse.Namespace) -> int:
     if result["unchanged"] and not args.dry_run:
         verb = "already correct in"
     print(f"{verb} {result['path']}")
-    print(f'  "semlayer": {json.dumps(result["after"])}')
+    for line in result["after_text"].strip().splitlines():
+        print(f"  {line}")
     if result["other_servers"]:
         print(f"  (left alone: {', '.join(result['other_servers'])})")
     warn = mi.warning_for(client)

@@ -160,6 +160,30 @@ registries pin the repo, the workflow FILE NAME and the environment
 5. Approve the deployment when GitHub asks.
 6. Verify from the two APIs above, not from the web pages.
 
+## The .mcpb bundle has never been installed
+
+Built, validated, packed and attached to every release since 0.7.0b6 -- and
+never once run by Claude Desktop, because the machine it is developed on
+does not have Desktop installed. What IS verified is the invocation the
+manifest declares: `uv run --directory <dir> src/server.py` creates the
+environment, installs 65 packages and answers an MCP `initialize` with our
+serverInfo.
+
+What is NOT verified is the host half: that Desktop honours
+`server.type: "uv"`, provisions Python itself, and passes `user_config`
+values through as the environment variables the manifest names.
+
+If it fails, the symptom tells you which:
+
+| symptom | cause |
+|---|---|
+| Desktop refuses the file at install | `type: "uv"` unsupported in that version -- fall back to a `uvx` `mcp_config` with an ABSOLUTE path to uvx |
+| Installs, server never starts | the host did not provision uv; same fallback |
+| Starts, but ignores the layer you chose | `user_config` is not reaching `SEMLAYER_LAYER`; check `src/server.py` reads it |
+
+Ten minutes on any machine with Desktop. Until someone spends them, the
+bundle is a thing we ship and have not used.
+
 ## Still open
 
 - **Open VSX trusted publishing.** 0.1.0 went out with a token because the

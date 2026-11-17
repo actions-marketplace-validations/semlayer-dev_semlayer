@@ -68,14 +68,30 @@ unless you give the full path.
 semlayer client list                 # the clients on this machine, and their state
 semlayer client add claude-code      # write the entry, preserving everything else
 semlayer client add cursor --dry-run # see exactly what would change first
+semlayer client add codex            # Codex, and with it ChatGPT desktop
 ```
 
-Knows Claude Code, Claude Desktop, Cursor, Cline and VS Code's own agent. It records an **absolute**
+Knows Claude Code, Claude Desktop, Cursor, Cline, VS Code's own agent, and
+Codex. It records an **absolute**
 command (a client launched from a dock does not inherit your shell's PATH),
 keeps the arguments as arguments, merges into `mcpServers` without touching
 any other server or key, and refuses rather than overwrites if the file is
 not valid JSON. `--layer PATH` pins one layer; omit it and the server finds
 one, which is what a first run wants.
+
+### Codex, the Codex extension, and ChatGPT desktop
+
+All three read `$CODEX_HOME/config.toml` (`~/.codex/config.toml`), so one
+entry serves all three. ChatGPT on the **web** reads nothing local and cannot
+be pointed at a local server at all.
+
+That file is TOML and is usually hand-written, so semlayer edits it rather
+than rewriting it: the `[mcp_servers.semlayer]` table is replaced or
+appended, and your comments, your order, your other servers and an `env`
+sub-table under the semlayer entry all stay exactly where they are. The key
+is `mcp_servers`, snake_case -- `mcpServers` in a Codex config parses and
+does nothing. `codex mcp add semlayer -- <command> mcp` writes the same table
+through the client itself if you would rather it did.
 
 The JSON below is for a client this does not know, or for when you would
 rather see it yourself.
