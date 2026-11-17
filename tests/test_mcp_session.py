@@ -442,6 +442,104 @@ def test_the_handshake_now_names_inference_and_the_answer_order():
     assert "Never ask the user for a password or a key in chat." in text
 
 
+def test_the_handshake_routes_execution_through_the_execution_block():
+    """Which executor to use is NOT a rule the model carries. `check_sql` is
+    the mandate and is executor-agnostic; whether semlayer can execute
+    depends on whether a connection opens in this session, which the server
+    knows -- so it states the fact rather than leaving the model to infer it
+    from a vendor error string."""
+    text = mcp_server._INSTRUCTIONS
+    assert "including SQL you mean to run with a tool that is not semlayer's" in text
+    assert "`execution` block" in text
+    assert "VERBATIM and never re-drafted" in text
+    assert "`target`" in text
+    # The unconditional order this replaced must be gone: it cost a wasted
+    # round trip on every question in a session that can never execute.
+    assert "Execute with `run_sql` FIRST" not in text
+
+
+def test_status_offers_run_sql_until_something_proves_otherwise():
+    """Optimistic by design: being wrong costs one round trip, once."""
+    out = call(mcp_server.build_server(Session("duckdb:/data/w.duckdb")), "status")
+    assert out["execution"]["available"] is True
+    assert out["execution"]["via"] == "run_sql"
+    assert out["execution"]["target"] == "duckdb:/data/w.duckdb"
+
+
+def test_a_connection_that_will_not_open_turns_execution_off_for_the_session(gold):
+    """Paid once a session, not once a question. The first failure to OPEN a
+    connection is proof -- a query the warehouse opened and then rejected is
+    a different case and must not land here."""
+    s = Session("duckdb:/nonexistent/nope.duckdb")
+    s.doc = gold
+    out = mcp_server.agent_run(gold, "select 1", s)
+    assert out["ran"] is False
+    assert out["execution"]["available"] is False
+    assert "VERBATIM" in out["next"]
+    assert "do not have to try" in out["next"]
+    # and it sticks, so the next question is told up front
+    assert s.execution()["available"] is False
+    later = call(mcp_server.build_server(s), "status")
+    assert later["execution"]["available"] is False
+    assert later["execution"]["reason"] == "warehouse_unreachable"
+
+
+def test_context_for_question_routes_to_a_foreign_tool_when_we_cannot_execute(gold):
+    """The routing arrives WITH the context, before the SQL is written."""
+    s = Session("snowflake://acme/ACME_PROD.SALES")
+    s.doc = gold
+    s.note_cannot_execute("warehouse_unreachable", "OperationalError: 250001")
+    out = mcp_server.agent_context(gold, "revenue by region", s)
+    assert out["execution"]["available"] is False
+    assert "semlayer cannot execute here" in out["next"]
+    assert "VERBATIM" in out["next"]
+    assert "check_sql" in out["next"]
+    assert "ACME_PROD.SALES" in out["next"]
+
+
+def test_context_for_question_keeps_run_sql_while_execution_works(gold):
+    s = Session("duckdb:/data/w.duckdb")
+    s.doc = gold
+    out = mcp_server.agent_context(gold, "revenue by region", s)
+    assert out["execution"]["available"] is True
+    assert "run_sql" in out["next"]
+
+
+def test_the_handoff_names_the_target_a_foreign_tool_must_point_at():
+    """The one failure mode running elsewhere has and running here does not:
+    a connector left on a different database answers the query, returns rows
+    that look right, and is wrong."""
+    s = Session("snowflake://acme/ACME_PROD.SALES")
+    s.note_cannot_execute("warehouse_unreachable", "boom")
+    note = s.execution()["note"]
+    assert "ACME_PROD.SALES" in note
+    assert "look right and are not" in note
+
+
+def test_the_mcp_tool_descriptions_are_a_pinned_prompt_surface():
+    """`examples/agent_pipeline` interpolates these descriptions VERBATIM
+    into its system prompt, so every byte is hashed into the benchmark
+    cassettes. Editing one is NOT a documentation change -- it invalidates
+    the layer-mode recordings and must be followed by a re-record
+    (`python examples/agent_pipeline/pipeline.py --mode layer`, 18 calls).
+    This wording was recorded on 2026-11-16 for exactly that reason.
+
+    It says ANYWHERE because in a multi-connector session this description
+    is the only thing deciding whether an agent holding its own SQL
+    executor comes here first; `_INSTRUCTIONS` carries the same rule but
+    competes with every other server's instructions.
+    """
+    srv = mcp_server.build_server(Session())
+    text = (srv._tool_manager.get_tool("check_sql").description or "")
+    assert text.startswith(
+        "Lint SQL against the semantic layer BEFORE it runs ANYWHERE.")
+    # No assertion may straddle a line break: a raw docstring keeps the
+    # source indentation, so "not\nsemlayer's" is really "not\n        semlayer's".
+    assert "with a tool that is not" in text
+    assert "semlayer's" in text
+    assert "return a NUMBER rather than an error" in text
+
+
 # --- the server must answer while a run is going -------------------------
 
 def test_status_is_answered_while_infer_is_waiting(_nowhere, built_fixture,

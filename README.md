@@ -5,6 +5,8 @@
 **The semantic layer that infers itself — skip the quarter of hand-writing dbt YAML.**
 **Fair Source** ([FSL-1.1-ALv2](LICENSE.md)); the format and its schemas are Apache-2.0.
 
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/semlayer-dev/semlayer)
+
 Point it at your warehouse. It profiles every column, discovers the foreign keys nobody declared, decodes the status columns, finds the business rules hiding in your aggregate tables, and writes the whole thing down as a portable semantic layer in an openly licensed format — with **confidence, provenance, and lifecycle on every single claim** — ready for any AI agent to consume over MCP.
 
 ```bash

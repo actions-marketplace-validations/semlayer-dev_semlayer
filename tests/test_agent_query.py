@@ -243,3 +243,111 @@ def test_the_refusal_names_the_statement_in_sql_words(sql, label):
     refused = aq.select_only(sql)
     assert refused is not None
     assert refused.startswith(label), refused
+
+
+# --- why the warehouse said no -------------------------------------------
+#
+# A statement the warehouse PARSED and then refused for want of a grant is
+# not a broken statement, and the difference decides what the agent should
+# do with it: run it unchanged somewhere that has the grant, or rewrite it.
+# That used to be the model's call, made by reading a vendor error string.
+# These are the strings, taken from what each warehouse actually says.
+
+class _Boom(Exception):
+    """A driver exception, with whatever attributes that driver sets."""
+
+    def __init__(self, message, **attrs):
+        super().__init__(message)
+        for k, v in attrs.items():
+            setattr(self, k, v)
+
+
+@pytest.mark.parametrize("kind,exc", [
+    # Postgres and Redshift: SQLSTATE 42501 is insufficient_privilege.
+    ("permission", _Boom("permission denied for table ord_hdr", sqlstate="42501")),
+    # psycopg2 spells the same field `pgcode`.
+    ("permission", _Boom("permission denied for table ord_hdr", pgcode="42501")),
+    # Snowflake 003001.
+    ("permission", _Boom("003001: Insufficient privileges to operate on table "
+                         "'ORD_HDR'", errno=3001)),
+    # BigQuery, through google.api_core, which carries the status as `code`.
+    ("permission", _Boom("403 Access Denied: Table p:d.t: User does not have "
+                         "permission to query table p:d.t.", code=403)),
+    # No code at all: the message is the only signal left.
+    ("permission", _Boom("User is not authorized to perform this action")),
+    # Snowflake 002003, which is ONE error for two causes on purpose, so that
+    # a role cannot discover objects it may not see.
+    ("permission_or_missing",
+     _Boom("002003: SQL compilation error: Object 'ORD_HDR' does not exist or "
+           "not authorized.", errno=2003)),
+    ("permission_or_missing",
+     _Boom("Object 'ORD_HDR' does not exist or not authorized.")),
+    # And the negatives, which matter more: a missing table is NOT a grant
+    # problem, and routing it to another tool would waste a round trip and
+    # then report the same failure.
+    ("statement", _Boom("Catalog Error: Table with name foo does not exist!")),
+    ("statement", _Boom('Parser Error: syntax error at or near "slect"')),
+    ("statement", _Boom("Binder Error: No function matches the given name and "
+                        "argument types 'no_such_function(INTEGER)'")),
+    ("statement", _Boom("Out of Memory Error: could not allocate block")),
+])
+def test_a_refusal_is_classified_here_not_by_the_model(kind, exc):
+    why = aq.classify_warehouse_error(exc)
+    assert why["kind"] == kind, why
+    assert why["retryable_elsewhere"] is (kind != "statement")
+
+
+def test_the_classification_says_what_decided_it():
+    """So a wrong call can be read off the result rather than reconstructed
+    from the warehouse's logs."""
+    assert aq.classify_warehouse_error(
+        _Boom("nope", sqlstate="42501"))["signal"] == "SQLSTATE 42501"
+    assert aq.classify_warehouse_error(
+        _Boom("nope", errno=3001))["signal"] == "warehouse error 3001"
+    assert aq.classify_warehouse_error(
+        _Boom("Access Denied: no"))["signal"] == "access denied"
+    assert aq.classify_warehouse_error(_Boom("Parser Error"))["signal"] is None
+
+
+class _Refusing:
+    """A source whose connection is open and whose warehouse says no."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def query_capped(self, sql, limit=None, timeout_s=None):
+        raise self.exc
+
+
+def test_a_grant_problem_is_not_offered_a_repair(doc):
+    """`repair` is how correct SQL gets rewritten until the message changes.
+    The statement passed check_sql and the warehouse parsed it."""
+    out = aq.run(doc, _Refusing(_Boom("permission denied for table ord_hdr",
+                                      sqlstate="42501")),
+                 "select ord_id from ord_hdr")
+    assert out["ran"] is False
+    assert out["error_kind"]["kind"] == "permission"
+    assert "repair" not in out, "nothing here is broken enough to repair"
+    assert "VERBATIM" in out["next"]
+    assert "Do NOT" in out["next"] and "re-draft" in out["next"]
+
+
+def test_an_ambiguous_refusal_sends_the_agent_both_ways(doc):
+    """Snowflake does not say which it was, so neither do we: try elsewhere,
+    and if it fails there too the name is wrong."""
+    out = aq.run(doc, _Refusing(_Boom("002003: Object 'ORD_HDR' does not exist "
+                                      "or not authorized.", errno=2003)),
+                 "select ord_id from ord_hdr")
+    assert out["error_kind"]["kind"] == "permission_or_missing"
+    assert "VERBATIM" in out["next"], "the other tool may have the role"
+    assert "get_tables" in out["repair"]["rule"], "and the name may be wrong"
+
+
+def test_a_broken_statement_still_gets_the_repair_loop(doc, source):
+    """The path the benchmark's repair loop is built on must not have moved."""
+    out = aq.run(doc, source, "select no_such_function(ord_id) from ord_hdr")
+    assert out["ran"] is False
+    assert out["error_kind"]["kind"] == "statement"
+    assert out["error_kind"]["retryable_elsewhere"] is False
+    assert out["repair"]["sql"] == "select no_such_function(ord_id) from ord_hdr"
+    assert "VERBATIM" not in out["next"], "another tool will refuse it too"

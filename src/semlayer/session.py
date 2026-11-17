@@ -1256,6 +1256,15 @@ class Session:
         # `for_worker` exists because of it), and an agent's query arriving
         # mid-inference would be a second user of the same handle.
         self._in_use = threading.Lock()
+        # Whether semlayer can execute SQL here AT ALL. Set once, by the
+        # first failure to OPEN a warehouse connection, which is the only
+        # unambiguous proof: a query the warehouse opened and then rejected
+        # says the connection works and the statement or the grant does not,
+        # and a foreign SQL tool would be told the same thing. Advertised in
+        # `status` and `context_for_question` so the agent is handed the fact
+        # rather than inferring it from a vendor error string, and so the
+        # wasted round trip is paid once a session instead of once a question.
+        self._cannot_execute: dict | None = None
         # Whether a question has been answered yet, and whether the one
         # sentence about the model key has been said. Both exist so that
         # sentence lands AFTER the first answer and exactly once: a stranger
@@ -1694,9 +1703,14 @@ class Session:
             # of the result can tell the two apart afterwards. Ours is a
             # refusal -- nothing was sent to the warehouse.
             self.count_query("refused")
-            out["next"] = ("Tell the user the query has to wait for the run to "
-                           "finish, say roughly where the run is, and call "
-                           "run_sql again when status says `ready`.")
+            out["next"] = (
+                "Tell the user the query has to wait for the run to finish, "
+                "and say roughly where the run is. Nothing was sent to the "
+                "warehouse and this SQL has NOT been linted. If they have "
+                "another SQL tool connected to this warehouse they do not "
+                "have to wait: call check_sql on this statement, then run "
+                "exactly what it approves VERBATIM with that tool. Otherwise "
+                "call run_sql again when status says `ready`.")
             return out
         try:
             dialect = agent_query.dialect_for(family(self.connection or ""))
@@ -1934,6 +1948,56 @@ class Session:
                              "status to see it finish")
         return out
 
+    def _execution_target(self) -> str | None:
+        """Where SQL written from this layer is expected to run.
+
+        Named in every handoff because it is the one failure mode that
+        running elsewhere has and running here does not: a foreign SQL tool
+        left on a different database answers the query, returns rows that
+        look right, and is wrong.
+        """
+        if self.doc is not None:
+            wh = (self.doc.get("semantic_layer") or {}).get("warehouse")
+            if wh:
+                return str(wh)
+        return self.connection
+
+    def note_cannot_execute(self, reason: str, detail: str) -> None:
+        """Record that no warehouse connection can be opened in this session."""
+        self._cannot_execute = {"reason": reason, "detail": detail[:300]}
+
+    def execution(self) -> dict:
+        """Which executor to use, and where it has to be pointed.
+
+        The agent does not decide this and does not infer it from an error:
+        it is a fact about this session, so we state it.
+        """
+        target = self._execution_target()
+        if self._cannot_execute is None:
+            return {
+                "available": True,
+                "via": "run_sql",
+                "target": target,
+                "note": ("run_sql executes one read-only SELECT here. It "
+                         "applies the lint gate before the statement reaches "
+                         "the warehouse, and reports the row cap and timeout "
+                         "that applied."),
+            }
+        where = (f" Confirm that tool is pointed at {target}: a connector "
+                 "left on a different database returns rows that look right "
+                 "and are not." if target else "")
+        return {
+            "available": False,
+            "reason": self._cannot_execute["reason"],
+            "detail": self._cannot_execute["detail"],
+            "via": "another SQL tool the user has connected",
+            "target": target,
+            "note": ("semlayer cannot execute here. Call check_sql, then run "
+                     "exactly what it approves -- VERBATIM, never re-drafted "
+                     "-- with another SQL tool the user has connected."
+                     + where),
+        }
+
     def status(self) -> dict:
         """One object, written for an agent to act on rather than to read.
 
@@ -1954,6 +2018,7 @@ class Session:
             "env_file": _env_file_report(),
             "pending_question": self.pending_question,
             "autoloaded": self.autoloaded,
+            "execution": self.execution(),
         }
         payload["next"] = next_step(payload)
         return payload

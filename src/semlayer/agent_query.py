@@ -239,6 +239,89 @@ def _jsonable(value):
     return value
 
 
+# --- why the warehouse said no ---------------------------------------------
+#
+# A statement the warehouse PARSED and then refused for want of a privilege
+# is not a broken statement. It passed check_sql and the warehouse understood
+# it, so the right move is to run it unchanged somewhere with the grant --
+# and the wrong move, which a model shown an error and a `repair` block will
+# make, is to rewrite correct SQL until the error changes.
+#
+# Telling those apart was left to the model until now: it had to read a
+# vendor error string and decide. That is one judgement call per failure, on
+# text that differs per warehouse, with no way to test the answer. It is
+# decided here instead -- once, in one place, the same on every warehouse,
+# and wrong in a way a test can catch rather than in a way that shows up as
+# a different answer in each conversation.
+
+#: SQLSTATEs that are about who is asking rather than what was asked.
+#: 42501 is insufficient_privilege -- Postgres and Redshift both set it, and
+#: Snowflake does on some paths. 28000 is invalid authorization: the
+#: credentials themselves, not a grant on an object, which is a different
+#: cause with the same answer -- nothing semlayer can rewrite will fix it.
+_PERMISSION_SQLSTATES = frozenset({"42501", "28000"})
+
+#: Snowflake error numbers. 3001 is "Insufficient privileges to operate on".
+_PERMISSION_ERRNOS = frozenset({3001})
+
+#: Snowflake's 2003 is "Object does not exist, or operation cannot be
+#: performed" -- deliberately one error for two causes, so that a role cannot
+#: discover the existence of objects it may not see. We do not know which it
+#: was either, and must not pretend to.
+_AMBIGUOUS_ERRNOS = frozenset({2003})
+
+_AMBIGUOUS_PHRASES = (
+    "does not exist or not authorized",
+    "does not exist or is not authorized",
+)
+
+#: Checked only after the ambiguous phrases, which contain "not authorized".
+_PERMISSION_PHRASES = (
+    "insufficient privileges",
+    "permission denied",
+    "access denied",
+    "not authorized",
+    "unauthorized",
+    "does not have permission",
+    "forbidden",
+)
+
+
+def classify_warehouse_error(e: BaseException) -> dict:
+    """What a refusal was about: the grant, the statement, or either.
+
+    `signal` names what decided it, so a wrong classification can be read
+    off the result instead of reconstructed from the warehouse's logs.
+
+    Codes before prose. A SQLSTATE or a driver's error number is a stable
+    contract; the message is a string that a vendor can reword in a release.
+    """
+    text = str(e).lower()
+    state = str(getattr(e, "sqlstate", None) or getattr(e, "pgcode", None) or "")
+    errno = getattr(e, "errno", None)
+    # 403 from BigQuery's REST layer: `google.api_core.exceptions.Forbidden`
+    # carries it as `code`.
+    http = getattr(e, "code", None)
+
+    kind, signal = "statement", None
+    if errno in _AMBIGUOUS_ERRNOS:
+        kind, signal = "permission_or_missing", f"warehouse error {errno}"
+    elif hit := next((p for p in _AMBIGUOUS_PHRASES if p in text), None):
+        kind, signal = "permission_or_missing", hit
+    elif state in _PERMISSION_SQLSTATES:
+        kind, signal = "permission", f"SQLSTATE {state}"
+    elif errno in _PERMISSION_ERRNOS:
+        kind, signal = "permission", f"warehouse error {errno}"
+    elif http == 403:
+        kind, signal = "permission", "HTTP 403"
+    elif hit := next((p for p in _PERMISSION_PHRASES if p in text), None):
+        kind, signal = "permission", hit
+    # Derived, never set by hand: a kind that is retryable elsewhere and a
+    # flag that says it is not would send the agent two ways at once.
+    return {"kind": kind, "retryable_elsewhere": kind != "statement",
+            "signal": signal}
+
+
 def run(doc: dict, source, sql: str, *, dialect: str = "duckdb",
         limit: int = RUN_SQL_ROWS,
         timeout_s: float | None = RUN_SQL_TIMEOUT_S) -> dict:
@@ -298,16 +381,53 @@ def run(doc: dict, source, sql: str, *, dialect: str = "duckdb",
         columns, rows, truncated = source.query_capped(sql, limit=limit,
                                                        timeout_s=timeout_s)
     except Exception as e:
-        return {"ran": False, "sql": sql,
-                "error": f"{type(e).__name__}: {str(e)[:400]}",
-                "repair": {"sql": sql,
-                           "problems": f"{type(e).__name__}: {str(e)[:400]}",
-                           "rule": ("Fix the SQL. The schema in your context "
-                                    "is the layer's view of the warehouse; if "
-                                    "they disagree, trust the error.")},
-                "next": ("The warehouse refused this query. Fix it from the "
-                         "error and call run_sql again, or tell the user what "
-                         "is wrong if it cannot be fixed.")}
+        detail = f"{type(e).__name__}: {str(e)[:400]}"
+        why = classify_warehouse_error(e)
+        failed: dict = {"ran": False, "sql": sql, "error": detail,
+                        "error_kind": why}
+        if why["kind"] == "permission":
+            # No `repair` block deliberately. The statement is not what is
+            # wrong, and handing a model something called "repair" is how
+            # correct SQL gets rewritten until the error message changes.
+            failed["next"] = (
+                "The warehouse understood this statement and refused it for "
+                "want of a privilege, not because anything is wrong with it: "
+                "it passed check_sql and the warehouse parsed it. Do NOT "
+                "re-draft it. Run it VERBATIM with another SQL tool the user "
+                "has connected and answer from those rows. If there is no "
+                "other tool, tell the user which object the grant is missing "
+                "on -- that is a one-line GRANT for whoever owns it, and no "
+                "rewriting here will get round it.")
+        elif why["kind"] == "permission_or_missing":
+            failed["repair"] = {
+                "sql": sql,
+                "problems": detail,
+                "rule": ("Check the object name against get_tables BEFORE "
+                         "changing anything else: the warehouse reports a "
+                         "missing object and an invisible one identically."),
+            }
+            failed["next"] = (
+                "The warehouse says this object either does not exist or is "
+                "not visible to the role semlayer is connected as. It does "
+                "not distinguish the two, so neither can you. Run this "
+                "statement VERBATIM with another SQL tool the user has "
+                "connected: a tool with a different role may see the object. "
+                "If it fails there the same way, the name is wrong -- check "
+                "it against get_tables and fix the SQL.")
+        else:
+            failed["repair"] = {
+                "sql": sql,
+                "problems": detail,
+                "rule": ("Fix the SQL. The schema in your context is the "
+                         "layer's view of the warehouse; if they disagree, "
+                         "trust the error."),
+            }
+            failed["next"] = (
+                "The warehouse refused this statement on its own terms, and "
+                "not for want of a privilege. Fix the SQL from the message "
+                "and call run_sql again, or tell the user what is wrong if "
+                "it cannot be fixed.")
+        return failed
 
     out: dict = {
         "ran": True,

@@ -154,7 +154,7 @@ def test_every_known_client_has_a_distinct_id_and_path():
     assert len({c.id for c in cs}) == len(cs)
     assert len({str(c.path) for c in cs}) == len(cs)
     assert {c.id for c in cs} == {"claude-code", "claude-desktop", "cursor",
-                                  "cline", "vscode"}
+                                  "cline", "vscode", "codex"}
 
 
 def test_vscode_is_the_portable_file_not_the_deprecated_workspace_one(monkeypatch):
@@ -184,3 +184,210 @@ def test_claude_code_warns_about_the_file_it_shares_with_itself():
 def test_the_restart_note_says_what_restart_means():
     assert "NEW session" in mi.RESTART_NOTE
     assert "startup" in mi.RESTART_NOTE
+
+
+# --- Codex, which keeps TOML ------------------------------------------------
+#
+# A different FORMAT, not just a different path, and the reason it is worth
+# the code: OpenAI's MCP docs say Codex, the Codex IDE extension and the
+# ChatGPT DESKTOP app all read this one file. It is the only local-config
+# route to a ChatGPT user. A `config.toml` is also hand-written, so these
+# tests are mostly about what must survive being edited.
+
+CODEX_CONFIG = '''# my codex config -- hand written
+model = "gpt-5"
+
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]  # docs lookup
+
+[mcp_servers.context7.env]
+MY_ENV_VAR = "MY_ENV_VALUE"
+
+[sandbox_workspace_write]
+network_access = true
+'''
+
+
+def _codex(tmp_path, body=CODEX_CONFIG):
+    path = tmp_path / "config.toml"
+    if body is not None:
+        path.write_text(body)
+    return mi.Client("codex", "Codex", path, key="mcp_servers", fmt="toml")
+
+
+def test_codex_is_one_file_for_three_clients(monkeypatch):
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    c = mi.find("codex")
+    assert c.path.name == "config.toml"
+    assert ".codex" in str(c.path)
+    assert c.key == "mcp_servers", "snake_case: mcpServers here parses and does nothing"
+    assert c.fmt == "toml"
+
+
+def test_codex_home_moves_the_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "elsewhere"))
+    assert mi.find("codex").path == tmp_path / "elsewhere" / "config.toml"
+
+
+def test_a_hand_written_toml_keeps_its_comments_its_order_and_its_servers(tmp_path):
+    """The reason this is a text edit and not a round-trip.
+
+    A TOML serialiser would return a valid file with the comments gone, the
+    keys in some other order, and no way for the user to tell us that was
+    not what they wanted.
+    """
+    tomllib = pytest.importorskip("tomllib")
+    c = _codex(tmp_path)
+    mi.apply(c)
+    after = c.path.read_text()
+
+    assert "# my codex config -- hand written" in after
+    assert "# docs lookup" in after, "an inline comment on another server"
+    assert after.index("[mcp_servers.context7]") < after.index("[sandbox_workspace_write]")
+    doc = tomllib.loads(after)
+    assert sorted(doc["mcp_servers"]) == ["context7", "semlayer"]
+    assert doc["mcp_servers"]["context7"]["env"] == {"MY_ENV_VAR": "MY_ENV_VALUE"}
+    assert doc["model"] == "gpt-5"
+    assert doc["sandbox_workspace_write"]["network_access"] is True
+
+
+def test_the_codex_entry_is_replaced_in_place_not_appended_again(tmp_path):
+    """Twice must not leave two tables: a duplicate key stops TOML parsing,
+    which would cost the user every server in the file and not just ours."""
+    tomllib = pytest.importorskip("tomllib")
+    c = _codex(tmp_path, CODEX_CONFIG + '''
+[mcp_servers.semlayer]
+command = "semlayer"
+args = ["mcp"]
+
+[tui]
+notifications = true
+''')
+    mi.apply(c)
+    after = c.path.read_text()
+
+    assert after.count("[mcp_servers.semlayer]") == 1
+    assert "command = \"semlayer\"\n" not in after, "the stale bare command is gone"
+    assert "[tui]" in after, "what followed our table is still there"
+    assert tomllib.loads(after)["tui"]["notifications"] is True
+
+
+def test_a_sub_table_the_user_added_under_our_entry_survives(tmp_path):
+    """`[mcp_servers.semlayer.env]` is their setting, in a table of its own.
+    We rewrite ours and leave theirs attached."""
+    tomllib = pytest.importorskip("tomllib")
+    c = _codex(tmp_path, '''[mcp_servers.semlayer]
+command = "old"
+args = ["mcp"]
+
+[mcp_servers.semlayer.env]
+ANTHROPIC_API_KEY = "sk-theirs"
+''')
+    mi.apply(c)
+    doc = tomllib.loads(c.path.read_text())
+    assert doc["mcp_servers"]["semlayer"]["env"] == {"ANTHROPIC_API_KEY": "sk-theirs"}
+    assert doc["mcp_servers"]["semlayer"]["command"] != "old"
+
+
+def test_a_windows_command_is_escaped_not_pasted(tmp_path, monkeypatch):
+    r"""`command = "C:\Users\..."` is a TOML parse error, because `\U` is not
+    an escape. One unescaped backslash takes out the whole file."""
+    tomllib = pytest.importorskip("tomllib")
+    bin_dir = tmp_path / "Users\\Raj"
+    bin_dir.mkdir()
+    fake = bin_dir / "semlayer"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    c = _codex(tmp_path, "")
+    mi.apply(c)
+    text = c.path.read_text()
+    assert "Users\\\\Raj" in text, "the backslash is doubled in the file"
+    assert tomllib.loads(text)["mcp_servers"]["semlayer"]["command"] == str(fake)
+
+
+def test_an_entry_we_cannot_edit_is_refused_not_duplicated(tmp_path):
+    """An inline `mcp_servers = {...}` is legal TOML that the table scan
+    cannot see. Appending our table would be a duplicate key."""
+    pytest.importorskip("tomllib")
+    c = _codex(tmp_path, 'mcp_servers = { semlayer = { command = "x", args = ["mcp"] } }\n')
+    with pytest.raises(SemlayerError, match="cannot edit"):
+        mi.apply(c)
+    assert "command = \"x\"" in c.path.read_text(), "the file must be left alone"
+
+
+def test_invalid_toml_is_refused_not_overwritten(tmp_path):
+    """Same stance as a broken JSON config: it is theirs, and it probably
+    holds other servers."""
+    pytest.importorskip("tomllib")
+    c = _codex(tmp_path, "[mcp_servers.context7\ncommand = ")
+    with pytest.raises(SemlayerError, match="not valid TOML"):
+        mi.apply(c)
+    assert c.path.read_text() == "[mcp_servers.context7\ncommand = "
+
+
+def test_a_missing_codex_config_is_created_with_its_directory(tmp_path):
+    tomllib = pytest.importorskip("tomllib")
+    c = mi.Client("codex", "Codex", tmp_path / "deep" / "config.toml",
+                  key="mcp_servers", fmt="toml")
+    assert not c.exists
+    mi.apply(c)
+    assert tomllib.loads(c.path.read_text())["mcp_servers"]["semlayer"]["args"] == ["mcp"]
+
+
+def test_the_codex_plan_is_a_dry_run_too(tmp_path):
+    c = _codex(tmp_path)
+    before = c.path.read_text()
+    result = mi.plan(c)
+    assert c.path.read_text() == before, "plan must not touch the file"
+    assert result["other_servers"] == ["context7"]
+    assert result["after_text"].startswith("[mcp_servers.semlayer]")
+
+
+def test_rewriting_the_same_codex_entry_is_reported_as_unchanged(tmp_path):
+    c = _codex(tmp_path)
+    mi.apply(c)
+    assert mi.plan(c)["unchanged"] is True
+
+
+# --- what the caller is allowed to print ------------------------------------
+
+def test_the_entry_is_shown_in_the_format_it_is_written_in(tmp_path):
+    """`after_text` is what the user is told. It has to match what they can
+    go and read in the file, or the next person debugs the wrong shape."""
+    assert mi.plan(_client(tmp_path))["after_text"].startswith('"semlayer": {')
+    assert "command = " in mi.plan(_codex(tmp_path))["after_text"]
+
+
+def test_the_rendered_file_is_available_but_is_not_the_report(tmp_path):
+    """`rendered` is the whole config, including everything else the user has
+    set up. `semlayer client ... --json` strips it for that reason."""
+    r = mi.plan(_codex(tmp_path))
+    assert "network_access" in r["rendered"], "it really is the whole file"
+    assert "network_access" not in json.dumps(
+        {k: v for k, v in r.items() if k not in ("merged", "rendered")})
+
+
+def test_configured_reads_both_formats_and_never_raises(tmp_path):
+    """`client list` has to describe a machine with a broken config on it."""
+    pytest.importorskip("tomllib")
+    jsonc = _client(tmp_path)
+    assert mi.configured(jsonc) is False, "no file at all"
+    mi.apply(jsonc)
+    assert mi.configured(jsonc) is True
+
+    codex = _codex(tmp_path)
+    assert mi.configured(codex) is False
+    mi.apply(codex)
+    assert mi.configured(codex) is True
+
+    codex.path.write_text("[mcp_servers.semlayer\n")
+    assert mi.configured(codex) is False, "broken file: False, not a traceback"
+
+
+def test_the_codex_warning_says_what_the_web_app_cannot_do():
+    warn = mi.warning_for(mi.find("codex"))
+    assert warn and "desktop" in warn
+    assert "web" in warn, "ChatGPT on the web reads no local config at all"

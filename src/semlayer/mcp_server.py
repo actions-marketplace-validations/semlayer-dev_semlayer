@@ -436,6 +436,14 @@ def _server_class():
 # the two clauses that had to be changed for slice 1 -- "how to start
 # inference", and `context_for_question` as the opener -- are both true as
 # of this slice, because `infer` and `context_for_question` exist.
+#
+# Amended 2026-11-16, also reviewed: the final paragraph no longer picks an
+# executor, because the order is not a rule -- it depends on whether a
+# warehouse connection can be opened in this session, which the server knows
+# and the model would otherwise have to infer from a vendor error string.
+# `check_sql` is the mandate and is executor-agnostic; `status` and
+# `context_for_question` carry an `execution` block that routes execution and
+# names the target a foreign tool must be pointed at.
 _INSTRUCTIONS = (
     "semlayer models a data warehouse into a semantic layer and serves it to "
     "you. "
@@ -468,10 +476,18 @@ _INSTRUCTIONS = (
     "the layer is ready, `status` reminds you to answer it. "
     "Once a layer is loaded, start every question with "
     "`context_for_question`, apply required filters, never use UNUSABLE "
-    "objects, run `check_sql` before any SQL runs, and run it with `run_sql`, "
-    "which executes one read-only SELECT against their warehouse. Answer in "
-    "words first, then state the assumptions the answer rests on, and caveat "
-    "answers built on lifecycle=inferred elements."
+    "objects, and run `check_sql` before any SQL runs -- including SQL you "
+    "mean to run with a tool that is not semlayer's. It is the gate, and a "
+    "statement it has not seen can return a confidently wrong NUMBER instead "
+    "of an error. `status` and `context_for_question` both carry an "
+    "`execution` block naming which executor to use: when it says `run_sql`, "
+    "use it -- it applies the gate before the statement reaches the "
+    "warehouse and reports the limits that applied. When it says otherwise, "
+    "semlayer cannot execute here: run exactly what `check_sql` approves, "
+    "VERBATIM and never re-drafted, with the SQL tool the user has "
+    "connected, and confirm that tool is pointed at the `target` the block "
+    "names. Answer in words first, then state the assumptions the answer "
+    "rests on, and caveat answers built on lifecycle=inferred elements."
 )
 
 
@@ -807,7 +823,25 @@ def agent_context(doc: dict, question: str, session: Session) -> dict:
 
     if question.strip():
         session.pending_question = None
-    return agent_query.context_for_question(doc, question)
+    out = agent_query.context_for_question(doc, question)
+    # Which executor to use travels WITH the context, because this is the
+    # call the instructions tell the agent to start every question with --
+    # so the routing arrives before the SQL is written, not after it fails.
+    execution = session.execution()
+    out["execution"] = execution
+    if not execution["available"]:
+        target = execution.get("target")
+        where = (f", against {target}. Confirm that tool points there before "
+                 "you trust the rows.") if target else "."
+        out["next"] = ("Write ONE SELECT from the context above, apply every "
+                       "required filter it names, and call check_sql on it. "
+                       "semlayer cannot execute here, so run exactly what "
+                       "check_sql approves -- VERBATIM, no re-drafting -- "
+                       "with another SQL tool the user has connected"
+                       + where + " Answer the user first and put the "
+                       "assumptions under the answer, offering to record a "
+                       "correction.")
+    return out
 
 
 def agent_run(doc: dict, sql: str, session: Session) -> dict:
@@ -823,12 +857,30 @@ def agent_run(doc: dict, sql: str, session: Session) -> dict:
         # reached a result to classify. Counted here because this is the
         # only outcome that happens outside it.
         session.count_query("warehouse_error")
-        return {"ran": False, "sql": sql,
-                "error": f"{type(e).__name__}: {str(e)[:300]}",
-                "next": ("No warehouse connection is open for this session. "
-                         "Call status: if a layer was loaded from a file, the "
-                         "connection it names may not be reachable from here, "
-                         "and the user has to say how to reach it.")}
+        detail = f"{type(e).__name__}: {str(e)[:300]}"
+        # Proof rather than a guess: the connection could not be OPENED, so
+        # nothing in this session can execute. Recorded so that the next
+        # question is told up front instead of paying this round trip again.
+        # A query the warehouse OPENED and then rejected is the other case
+        # and does not land here: that connection works.
+        session.note_cannot_execute("warehouse_unreachable", detail)
+        execution = session.execution()
+        target = execution.get("target")
+        where = (f", against {target}; confirm that tool points there before "
+                 "you trust the rows") if target else ""
+        return {"ran": False, "sql": sql, "error": detail,
+                "execution": execution,
+                "next": ("semlayer could not execute this and nothing ran, "
+                         "and this statement has NOT been linted. Call "
+                         "check_sql on it, then run exactly what check_sql "
+                         "approves VERBATIM with another SQL tool the user "
+                         "has connected" + where + ". You do not have to try "
+                         "run_sql again this session: status and "
+                         "context_for_question will say so up front. If no "
+                         "other tool is connected, call status -- the "
+                         "connection the layer names may not be reachable "
+                         "from here, and the user has to say how to reach "
+                         "it.")}
 
 
 # The user-invoked walkthrough. A PROMPT rather than a questionnaire, and
@@ -929,12 +981,16 @@ def build_server(layer: Session | dict):
 
     @srv.tool()
     def check_sql(sql: str, dialect: str = "duckdb") -> str:
-        """Lint SQL you wrote against the semantic layer BEFORE running it.
+        """Lint SQL against the semantic layer BEFORE it runs ANYWHERE.
 
-        Deterministic checks: unknown tables/columns, correlated references,
-        deprecated tables, missing required filters, fan-out aggregates,
-        SCD2 joins without a validity window. Fix every error and warning
-        (each finding carries a fix hint), then re-check.
+        Including SQL you intend to execute with a tool that is not
+        semlayer's. Deterministic checks: unknown tables/columns, correlated
+        references, deprecated tables, missing required filters, fan-out
+        aggregates, SCD2 joins without a validity window. These are the
+        mistakes that return a NUMBER rather than an error, so an unchecked
+        statement can be confidently wrong. Fix every error and warning
+        (each finding carries a fix hint), then re-check. Cheap,
+        deterministic, and it never touches the warehouse.
         """
         from semlayer.lint import lint_sql, without_positions
         # Without positions: an agent passed us a string it already holds, and

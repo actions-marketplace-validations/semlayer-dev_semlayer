@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### A refused query says WHY it was refused
+
+`run_sql` used to hand the agent a warehouse error and a paragraph telling it
+to work out, from the message, whether the problem was a grant or the SQL.
+That is one judgement call per failure, on text that differs per warehouse,
+with no way to test the answer -- and getting it wrong is expensive in both
+directions: correct SQL rewritten until the error changes, or a wasted round
+trip through a second tool that will refuse it for the same reason.
+
+The result now carries `error_kind`, decided in one place from SQLSTATE,
+driver error number, HTTP status and only then the message, with a `signal`
+field naming what decided it:
+
+- `permission` -- the warehouse parsed the statement and refused it for want
+  of a privilege. No `repair` block is offered, because nothing is broken:
+  run it verbatim with another tool, or name the missing grant.
+- `permission_or_missing` -- Snowflake's `002003` is one error for two
+  causes, on purpose, so that a role cannot discover objects it may not see.
+  We do not know which it was either, so the agent is sent both ways: try
+  elsewhere, and if it fails there too the name is wrong.
+- `statement` -- the warehouse's own terms. The repair loop, unchanged.
+
+A missing table is deliberately `statement` and not a grant problem: routing
+it to another tool would waste a call and then report the same failure.
+
+### `semlayer client add codex` -- and with it, ChatGPT desktop
+
+Codex keeps its MCP servers in `$CODEX_HOME/config.toml`, and OpenAI's
+documentation says the Codex CLI, the Codex IDE extension and the **ChatGPT
+desktop app** all read that one file. One client entry therefore reaches all
+three, which is the only local-config route to a ChatGPT user: ChatGPT on the
+web reads nothing on your machine and cannot be pointed at a local server at
+all.
+
+It is the first client whose config is not JSON, so it is not written the way
+the others are. A `config.toml` is a file someone wrote by hand -- it has
+comments, an order they chose, and settings semlayer knows nothing about --
+so the entry is edited in place: the `[mcp_servers.semlayer]` table is
+replaced or appended and every other byte stays where it was, including a
+comment on the line above and an `env` sub-table under our own entry. The key
+is `mcp_servers`, snake_case; `mcpServers` there parses and does nothing.
+
+Two things it refuses rather than breaks. A file that is not valid TOML is
+left alone, as a broken JSON config already was. And an entry in a form the
+text edit cannot see -- an inline `mcp_servers = {...}`, or a quoted key --
+is reported instead of appended, because a duplicate key stops the whole file
+parsing and would cost you every other server in it, not just ours.
+
 ## 0.7.0b6
 
 ### A GitHub Action: findings on the pull request diff
