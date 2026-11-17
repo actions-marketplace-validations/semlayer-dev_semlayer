@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.7.0b7
+
+### `status` and `context_for_question` say who executes the SQL
+
+The instructions used to tell the agent to try `run_sql` first. That is
+wrong wherever semlayer holds no warehouse credentials and the user's own
+SQL tool does: the agent pays a failed call per question before giving up,
+and has to read a vendor error string to know that it should.
+
+Both tools now carry an `execution` block -- `available`, `via`, `target`
+and a `note` -- naming the executor and the fully-qualified database the SQL
+is expected to run against. The instructions no longer name an executor at
+all; this is a fact about the session, so the session states it.
+
+It flips on the only unambiguous proof there is: a connection that will not
+OPEN. A statement the warehouse accepted and then refused says the
+connection works and the SQL or the grant does not, and a foreign tool would
+be told the same thing -- so that case flips nothing. One wasted round trip
+per session rather than one per question.
+
+When the block says semlayer cannot execute, the handoff is explicit: run
+what `check_sql` approves VERBATIM, never re-drafted, and confirm the other
+tool is pointed at the named target. A connector left on a different
+database answers the query, returns rows that look right, and is wrong.
+
 ### A refused query says WHY it was refused
 
 `run_sql` used to hand the agent a warehouse error and a paragraph telling it
