@@ -7,13 +7,13 @@
     "url": "https://github.com/semlayer-dev/semlayer",
     "source": "github"
   },
-  "version": "0.7.0b6",
+  "version": "0.7.0b7",
   "websiteUrl": "https://semlayer.dev",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "semlayer",
-      "version": "0.7.0b6",
+      "version": "0.7.0b7",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
