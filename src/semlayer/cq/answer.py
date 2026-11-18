@@ -26,12 +26,17 @@ QUERY_TIMEOUT_S = 60.0  # an agent's cross join must not hang the benchmark
 
 def _execute(con, sql: str) -> list:
     """Run `sql` with a watchdog: interrupt DuckDB after QUERY_TIMEOUT_S seconds."""
-    timer = threading.Timer(QUERY_TIMEOUT_S, con.interrupt)
-    timer.start()
+    watchdog = threading.Timer(QUERY_TIMEOUT_S, con.interrupt)
+    timer: threading.Timer | None = watchdog
+    try:
+        watchdog.start()
+    except RuntimeError:
+        timer = None   # no threads (Pyodide): run without a watchdog
     try:
         return con.execute(sql).fetchall()
     finally:
-        timer.cancel()
+        if timer is not None:
+            timer.cancel()
 
 PROMPT_VERSION = "v3"
 

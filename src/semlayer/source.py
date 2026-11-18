@@ -605,7 +605,15 @@ class DuckDBSource:
         timer = (threading.Timer(timeout_s, self.con.interrupt)
                  if timeout_s else None)
         if timer is not None:
-            timer.start()
+            try:
+                timer.start()
+            except RuntimeError:
+                # No threads here (Pyodide: "can't start new thread"). Run
+                # without a watchdog and say so, rather than refuse the query.
+                timer = None
+        # Read by agent_query.run so the limits it reports are the ones that
+        # applied: a timeout that could not be armed was not a limit.
+        self.last_timeout_armed = timer is not None or not timeout_s
         try:
             cur = self.con.execute(sql)
             columns = [d[0] for d in cur.description or []]

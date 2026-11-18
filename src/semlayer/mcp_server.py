@@ -19,11 +19,23 @@ from __future__ import annotations
 
 import json
 import re
-
-from mcp.server.fastmcp import Context
+from typing import TYPE_CHECKING
 
 from semlayer import __version__
 from semlayer.session import Session
+
+if TYPE_CHECKING:
+    from mcp.server.fastmcp import Context
+else:
+    # The pure query functions below are imported by the query path (cq.answer,
+    # agent_query) and must load where `mcp` is not installed -- a browser
+    # runtime. `Context` is only an annotation on one tool; FastMCP resolves it
+    # from this module's globals, so the real class is bound whenever `mcp`
+    # exists. `build_server` imports FastMCP itself and still fails loudly.
+    try:
+        from mcp.server.fastmcp import Context
+    except ImportError:
+        Context = None
 
 # ---------- pure query functions (unit-tested; MCP tools are thin wrappers) --
 

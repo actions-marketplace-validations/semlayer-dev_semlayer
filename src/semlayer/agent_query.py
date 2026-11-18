@@ -429,6 +429,10 @@ def run(doc: dict, source, sql: str, *, dialect: str = "duckdb",
                 "it cannot be fixed.")
         return failed
 
+    # A source whose watchdog could not start (no threads) says so; the limits
+    # must not claim a clock that never ran. Server-side timeouts have no flag.
+    if not getattr(source, "last_timeout_armed", True):
+        timeout_s = None
     out: dict = {
         "ran": True,
         "sql": sql,
