@@ -144,6 +144,13 @@ def infer_with_report(source, llm=None, options: InferOptions | None = None, *,
     its shape (describe runs two passes; link splits between queries and the
     model).
 
+    Additive extras, which a consumer must tolerate or ignore: a profile
+    `unit` event carries `"item"` (the table about to be profiled); link emits
+    one `{"stage": "link", "event": "found", "relationships": [{"from_table",
+    "from_columns", "to_table", "to_columns", "confidence"}, ...]}` once it
+    has decided, before its `done`; and enrich emits five coarse `unit` events
+    (one per phase, each with a plain `label`) rather than one per table.
+
     For a caller that is not waiting on the return value -- the MCP server
     runs this on a thread, reports it in `status` and streams it to the
     client -- and for cancellation: raising from the callback unwinds the run
@@ -201,7 +208,7 @@ def infer_with_report(source, llm=None, options: InferOptions | None = None, *,
         _timed("describe", lambda: describe_source(
             doc, stats, llm, no_samples=no_sample_egress, context=context,
             llm_workers=llm_workers, progress=notify))
-    _timed("enrich", lambda: enrich_source(source, doc, stats))
+    _timed("enrich", lambda: enrich_source(source, doc, stats, progress=notify))
     if context is not None and context.chunks:
         from semlayer.context import apply_doc_decodes, apply_doc_ratios
         apply_doc_decodes(doc, context.chunks)

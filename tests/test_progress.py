@@ -92,7 +92,9 @@ def test_link_reports_from_inside_its_queries(events):
 def test_every_unit_event_can_be_read_aloud(events):
     for e in events:
         if e["event"] == "unit":
-            assert e["label"] and " of " in e["label"], e
+            assert e["label"], e
+            if e["stage"] != "enrich":       # enrich's labels are plain phase names
+                assert " of " in e["label"], e
 
 
 def test_the_fraction_never_goes_backwards(events):
@@ -112,14 +114,18 @@ def test_the_fraction_never_goes_backwards(events):
 
 
 def test_the_stage_label_does_not_outlive_its_stage(events):
-    """Enrich has no per-unit loop, so a label left over from link would be
-    read out as what the run is doing now."""
+    """A label left over from link must not be read out as what enrich is
+    doing now. Enrich reports its own coarse phases; before its first one,
+    and after `found`/`done` of link, there is no label at all."""
     job = sess.InferJob("duckdb:w.duckdb", None, None, with_llm=False)
     for e in events:
         job.progress(e)
         if e["stage"] == "enrich":
-            assert job.label is None
-            assert job.as_dict()["doing"] == sess.STAGE_WORDS["enrich"]
+            own = [u["label"] for u in events
+                   if u["stage"] == "enrich" and u["event"] == "unit"]
+            assert job.label is None or job.label in own
+            if job.label is None:
+                assert job.as_dict()["doing"] == sess.STAGE_WORDS["enrich"]
 
 
 # --- describe, which needs a model ---------------------------------------

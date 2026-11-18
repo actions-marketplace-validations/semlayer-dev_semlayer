@@ -725,6 +725,12 @@ def link_source(source, doc: dict, stats_by_table: dict, llm=None, lineage=None,
         candidates, verdicts, llm, lineage=lineage, pk_by_table=pk_by_table)
     _apply_accepted(accepted, review, cols, lineage_wins)
     fk_out, fk_in = _emit_relationships(accepted, cols, doc, declared_edges)
+    if progress is not None:
+        progress({"stage": "link", "event": "found", "relationships": [
+            {"from_table": r["from"]["table"], "from_columns": r["from"]["columns"],
+             "to_table": r["to"]["table"], "to_columns": r["to"]["columns"],
+             "confidence": r["confidence"]}
+            for r in doc["semantic_layer"].get("relationships", [])]})
 
     hierarchies = _detect_recursive_hierarchies(doc, stats_by_table, source)
     if hierarchies:

@@ -1181,6 +1181,10 @@ class InferJob:
                 # inclusion queries and model chunks, which are ours.
                 self.tables_done = event.get("done")
                 self.tables_total = event.get("total")
+        elif kind == "found":
+            # Informational (link's relationships). Not a boundary: it must
+            # not clear the label or reset `within`.
+            pass
         else:
             # A stage boundary. Clear what belonged to the last stage: enrich
             # has no per-unit loop, so without this the label would still

@@ -96,12 +96,30 @@ def _write_back(view: dict, sl: dict) -> None:
             sl[k] = v
 
 
-def enrich_source(source, doc: dict, stats: dict) -> dict:
+def enrich_source(source, doc: dict, stats: dict, progress=None) -> dict:
     """Run the deterministic enrich tier.
 
     Covers decodes, deprecation, freshness, metrics, aggregate
     reconciliation, routing/domains, and snapshot filters.
+
+    `progress`: optional callback; receives a few coarse `unit` events at the
+    phase boundaries (not one per table), each with a plain `label`.
     """
+    phases = ("reading decodes, keys and deprecation",
+              "classifying time attributes and hierarchies",
+              "building metrics",
+              "matching aggregate tables",
+              "routing and domains")
+
+    def phase(n: int) -> None:
+        # `done` is phases FINISHED, called before the next one starts, as in
+        # progress.ticker; the label is a plain phrase, not "n of m".
+        if progress is not None:
+            progress({"stage": "enrich", "event": "unit", "done": n,
+                      "total": len(phases), "within": n / len(phases),
+                      "label": phases[n]})
+
+    phase(0)
     source = _CachingSource(source)
     sl = _modelled_view(doc["semantic_layer"])
     _upgrade_enum_decodes(source, sl, stats)
@@ -110,20 +128,24 @@ def enrich_source(source, doc: dict, stats: dict) -> dict:
     _detect_natural_keys(sl)
     _detect_deprecation(sl, stats)
     _infer_freshness(sl, stats)
+    phase(1)
     _classify_time_attributes(source, sl, stats)
     _level_hierarchies(source, sl, stats)
     # BEFORE the metric producers: every metric copies its base table's grain,
     # and reading it earlier silently gave all of them an empty string.
     _infer_grain(sl)
+    phase(2)
     metrics = _metric_candidates(sl)
     if metrics:
         sl["metrics"] = metrics
+    phase(3)
     aggs = _detect_aggregates(source, sl, stats)
     if aggs:
         sl["aggregate_tables"] = aggs
     _grain_from_reconciliation(sl, aggs)
     _apply_discovered_filters_to_metrics(sl)
     _propagate_parent_filters(source, sl, stats)
+    phase(4)
     _domains_and_routing(sl, aggs)
     _snapshot_filters(sl, stats)
     _infer_scd(sl)

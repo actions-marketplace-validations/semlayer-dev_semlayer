@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### The engine runs where there are no threads, and says what it is doing
+
+Three changes made for running the engine inside a browser tab on Pyodide.
+A native run behaves as before.
+
+- The package imports and infers without `mcp` installed. Only
+  `build_server` needs it.
+- A query watchdog that cannot start its timer runs the query without one
+  and records that, and `run_sql` no longer reports a time limit it could
+  not arm.
+- Progress events carry more: Profile names the table it is on, Link emits
+  a `found` event listing the relationships before it finishes, and Enrich
+  reports five steps where it reported none. A consumer that switches on
+  the event kind must ignore kinds it does not know.
+
 ## 0.7.0b7
 
 ### `status` and `context_for_question` say who executes the SQL

@@ -12,6 +12,14 @@ link's cost is split between inclusion queries and model validation in a
 ratio that depends on whether there is a model at all. A consumer that tried
 to work that out from unit counts would be guessing.
 
+Events are additive: a consumer ignores any kind or key it does not know.
+Beyond `start`, `done` and `unit` there is one more kind,
+`{"stage": "link", "event": "found", "relationships": [{"from_table",
+"from_columns", "to_table", "to_columns", "confidence"}, ...]}`, emitted once
+when link has decided and before its `done`. A `unit` event may carry `"item"`
+(profile: the table about to be profiled). Enrich emits a few coarse `unit`
+events at its phase boundaries, with a plain `label`.
+
 What is NOT here: wall-clock, weights, fractions across stages, or any
 estimate. Those belong to whoever is watching -- `session.InferJob` turns
 these events into a fraction and an ETA, and the CLI ignores them entirely.
@@ -24,7 +32,7 @@ from collections.abc import Callable
 
 def ticker(progress: Callable[[dict], None] | None, stage: str, total: int,
            verb: str, within: Callable[[int, int], float] | None = None,
-           ) -> Callable[[int], None]:
+           ) -> Callable[..., None]:
     """A per-unit progress callback for one loop, or a no-op if nobody watches.
 
     `done` is how many units are FINISHED, so a loop calls this BEFORE doing
@@ -34,18 +42,24 @@ def ticker(progress: Callable[[dict], None] | None, stage: str, total: int,
     `within` maps (done, total) to the stage fraction, for a stage whose
     units are not the whole stage -- describe's two passes, link's two
     phases. It defaults to done/total.
+
+    The returned callback takes an optional `item`: what the unit about to run
+    is called (a table name). When given it rides on the event as `"item"`.
     """
     if progress is None:
-        return lambda done: None
+        return lambda done, item=None: None
 
     def fraction(done: int, n: int) -> float:
         if within is not None:
             return within(done, n)
         return (done / n) if n else 1.0
 
-    def tick(done: int) -> None:
-        progress({"stage": stage, "event": "unit", "done": done, "total": total,
-                  "within": max(0.0, min(1.0, fraction(done, total))),
-                  "label": f"{verb} {min(done + 1, max(total, 1))} of {total}"})
+    def tick(done: int, item: str | None = None) -> None:
+        event = {"stage": stage, "event": "unit", "done": done, "total": total,
+                 "within": max(0.0, min(1.0, fraction(done, total))),
+                 "label": f"{verb} {min(done + 1, max(total, 1))} of {total}"}
+        if item is not None:
+            event["item"] = item
+        progress(event)
 
     return tick

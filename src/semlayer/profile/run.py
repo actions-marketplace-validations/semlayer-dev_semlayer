@@ -214,8 +214,8 @@ def profile_with_stats(source, no_sample_values: bool = False, llm=None, context
     ordered = sorted(tables_meta, key=lambda x: (x.schema, x.name))
     tick = ticker(progress, "profile", len(ordered), "profiling table")
     for done, t in enumerate(ordered):
-        tick(done)
         doc_table_name = doc_names[(t.schema, t.name)]
+        tick(done, doc_table_name)
         parts = partitions.get((t.schema, t.name)) if partitions else None
         inc = None
         # The tier is decided from the catalogue alone -- name and column
