@@ -29,6 +29,12 @@ Desktop, Claude Code or Cursor and ask it what it can see — it discovers the
 warehouses configured on your machine and says what to do next, with no layer
 built yet. See [docs/mcp.md](docs/mcp.md).
 
+**For Claude Desktop there is a one-click bundle.** Every
+[release](https://github.com/semlayer-dev/semlayer/releases) attaches a
+`semlayer-<version>.mcpb` file. Download it and double-click, and Claude
+Desktop installs the server. The bundle is about 12 KB; it installs semlayer
+from PyPI on first run, so you need neither Python nor uv beforehand.
+
 **Or have the agent install it.** Point any coding agent at this repository
 and ask it to install the semlayer MCP server: everything it needs is in
 [llms-install.md](llms-install.md), written for an agent rather than a
