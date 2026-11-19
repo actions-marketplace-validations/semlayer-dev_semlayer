@@ -326,8 +326,12 @@ def test_every_registered_mcp_tool_is_declared():
     import re
     src = (pathlib.Path(__file__).parent.parent
            / "src" / "semlayer" / "mcp_server.py").read_text()
-    registered = set(re.findall(r"@srv\.tool\(\)\s*\n\s*def (\w+)", src))
-    assert registered, "found no @srv.tool() registrations -- the regex is stale"
+    # The decorator takes arguments now and can span lines, and one tool is
+    # `async def` -- which the earlier, stricter pattern silently skipped.
+    registered = set(re.findall(
+        r"@srv\.tool\([^@]*?\)\s*\n\s*(?:async\s+)?def (\w+)", src))
+    assert len(registered) >= 21, (
+        f"found {len(registered)} @srv.tool registrations -- the regex is stale")
     assert registered <= ts.TOOLS
 
 
