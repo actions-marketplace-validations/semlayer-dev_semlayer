@@ -13,7 +13,10 @@
 # name or a filename containing shell syntax is executed, which is the
 # standard injection vector for actions -- and it is how the first draft of
 # this file ran `source` as a command from inside an error message.
-name: semlayer
+# The Marketplace refuses a name that matches an existing user or
+# organisation, and `semlayer` is one. This is the listing title only:
+# workflows refer to the repository, so renaming it breaks nobody.
+name: semlayer SQL check
 description: Check SQL against a semantic layer, or fail when the warehouse drifts.
 branding:
   icon: database

@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.7.0b8
+
+### The Action is named `semlayer SQL check`, so it can be listed
+
+The GitHub Marketplace refuses an Action whose name matches an existing
+user or organisation, and `semlayer` is one. The `name:` in `action.yml`
+is now `semlayer SQL check`. That is the listing title only. A workflow
+refers to the repository, `semlayer-dev/semlayer@v0.7.0-beta.8`, so
+nothing that uses the Action changes.
 
 ### The engine runs where there are no threads, and says what it is doing
 

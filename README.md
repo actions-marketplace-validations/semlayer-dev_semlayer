@@ -39,7 +39,7 @@ In VS Code and Cursor, the same layer underlines the fan-out joins and missing r
 In CI, the same findings land on the pull request diff:
 
 ```yaml
-- uses: semlayer-dev/semlayer@v0.7.0-beta.7
+- uses: semlayer-dev/semlayer@v0.7.0-beta.8
   with:
     mode: lint            # or: drift, to fail when the warehouse moved
     layer: layer.yaml
