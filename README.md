@@ -57,6 +57,55 @@ In CI, the same findings land on the pull request diff:
 
 From a checkout (to develop on semlayer itself): `pip install -e ".[warehouses]"`.
 
+## What to ask it
+
+Once the MCP server is connected, you talk to your agent as usual. These are
+things worth trying, with what semlayer does behind each one. The table and
+column names come from `messy_mart`, the sample retail warehouse the benchmark
+uses; yours will differ.
+
+**Before a layer exists**
+
+- *"What data can you see?"* The agent lists the warehouses configured on this
+  machine and says which ones semlayer can open. No credential is read and no
+  connection is opened.
+- *"Build a semantic layer for it."* The agent asks you first, because
+  inference reads your warehouse and spends your own LLM budget. A DuckDB file
+  finishes in the same turn; a real warehouse takes minutes.
+
+**Asking a question**
+
+- *"What was total order revenue by quarter?"* The agent pulls the tables,
+  joins and required filters that bear on the question, writes the SQL, checks
+  it against the layer, runs it read-only, and answers. Under the answer it
+  lists the assumptions nobody has confirmed yet.
+- *"Which table should I use for order revenue, and which should I avoid?"*
+  `use ord_hdr; avoid ord_hdr_legacy (superseded)`, with the summary tables
+  offered only where their grain covers the question.
+
+**Checking SQL you already have**
+
+Paste a statement and ask *"Check this before I run it."* Three from the
+sample warehouse, each of which runs without error and returns a wrong number:
+
+| SQL | What the check says |
+|---|---|
+| `SELECT SUM(tot_amt) FROM ord_hdr` | `missing_required_filter`: amounts over `ord_hdr` must exclude cancelled orders (`sts_cd <> 'X'`) |
+| `SELECT SUM(o.tot_amt) FROM ord_hdr o JOIN ord_ln l ON l.ord_id = o.ord_id WHERE o.sts_cd <> 'X'` | `fanout_aggregate`: the join to `ord_ln` multiplies each order's total |
+| `SELECT SUM(amount) FROM ord_hdr_legacy` | `deprecated_table`: use `ord_hdr` instead |
+
+**Reviewing what was inferred**
+
+- *"What in this layer has nobody reviewed?"* The open claims, as questions
+  you can answer, each with what the engine saw.
+- *"Yes, cancelled orders are excluded from revenue. Record that."* The verdict
+  is written to the layer with your name on it. The agent asks for your name
+  once and never signs for you.
+- *"Save the layer to semantic/layer.yaml."* It is written into your project,
+  where a teammate can read and review it.
+
+More in [docs/mcp.md](docs/mcp.md).
+
 ## Why
 
 AI agents fail on real warehouses: frontier models solved just **21.3%** of Spider 2.0's enterprise-warehouse tasks at publication (vs ~91% on the earlier academic Spider 1.0) — and even today's best agentic scaffolds only reach ~30%. The fix is a semantic layer — but every existing tool (dbt, LookML, Cube, Snowflake semantic views) makes humans write it by hand, and it goes stale the day someone runs an `ALTER TABLE`.
