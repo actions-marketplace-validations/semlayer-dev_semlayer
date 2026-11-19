@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.4",
   "name": "semlayer",
-  "version": "0.7.0b7",
+  "version": "0.7.0b8",
   "description": "Infers a semantic layer from your data warehouse and serves it to agents over MCP.",
   "author": {
     "name": "semlayer",
