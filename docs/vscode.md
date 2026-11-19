@@ -4,9 +4,16 @@ The CLI is where inference happens. The extension exists for the one thing a
 terminal structurally cannot do: tell you a query is wrong *while you are
 writing it*.
 
-Source: [`extension/`](../extension). Install with
-`code --install-extension semlayer-<version>.vsix`, or from either marketplace
-once published (`cursor --install-extension` for Cursor).
+It is published, as `semlayer.semlayer`:
+
+- **VS Code**: the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=semlayer.semlayer),
+  or search for "semlayer" in the Extensions view, or run
+  `code --install-extension semlayer.semlayer`.
+- **Cursor** and other editors that use Open VSX:
+  [open-vsx.org/extension/semlayer/semlayer](https://open-vsx.org/extension/semlayer/semlayer),
+  or `cursor --install-extension semlayer.semlayer`.
+
+Source: [`extension/`](../extension).
 
 ## What it is, architecturally
 

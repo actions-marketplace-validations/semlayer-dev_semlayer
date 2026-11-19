@@ -36,7 +36,7 @@ person, and it needs nothing else. semlayer is also in the official MCP
 registry as `dev.semlayer/mcp`, so a registry-aware client can find and
 install it without being told where to look.
 
-In VS Code and Cursor, the same layer underlines the fan-out joins and missing required filters as you type — [docs/vscode.md](docs/vscode.md).
+In VS Code and Cursor, the same layer underlines the fan-out joins and missing required filters as you type. Install the extension from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=semlayer.semlayer) or [Open VSX](https://open-vsx.org/extension/semlayer/semlayer) — [docs/vscode.md](docs/vscode.md).
 
 In CI, the same findings land on the pull request diff:
 
