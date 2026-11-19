@@ -1,5 +1,7 @@
 # semlayer
 
+👉 **Try it live in your browser, with nothing to install: [try.semlayer.dev](https://try.semlayer.dev)**
+
 <!-- mcp-name: dev.semlayer/mcp -->
 
 **The semantic layer that infers itself — skip the quarter of hand-writing dbt YAML.**
