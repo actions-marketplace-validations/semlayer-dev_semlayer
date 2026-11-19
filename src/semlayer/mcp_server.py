@@ -19,23 +19,30 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
 from semlayer import __version__
 from semlayer.session import Session
 
 if TYPE_CHECKING:
     from mcp.server.fastmcp import Context
+    from pydantic import Field
 else:
     # The pure query functions below are imported by the query path (cq.answer,
     # agent_query) and must load where `mcp` is not installed -- a browser
     # runtime. `Context` is only an annotation on one tool; FastMCP resolves it
     # from this module's globals, so the real class is bound whenever `mcp`
     # exists. `build_server` imports FastMCP itself and still fails loudly.
+    #
+    # `Field` is the same case: it appears only inside tool annotations, which
+    # stay strings until FastMCP evaluates them, and it is what puts a
+    # description on each argument in the tool's input schema.
     try:
         from mcp.server.fastmcp import Context
+        from pydantic import Field
     except ImportError:
         Context = None
+        Field = None
 
 # ---------- pure query functions (unit-tested; MCP tools are thin wrappers) --
 
@@ -503,6 +510,28 @@ _INSTRUCTIONS = (
 )
 
 
+def _hints(*, read_only: bool, destructive: bool = False,
+           idempotent: bool = True, open_world: bool = False):
+    """What a call does to the world, in the protocol's own vocabulary.
+
+    A client reads these to decide whether to ask its user first, and a
+    directory reads them to grade the tool. They are hints and never a
+    guarantee, so each one states what the code underneath does: `read_only`
+    for a tool that changes nothing outside this session, `destructive` for
+    one that can replace a file, `open_world` for one that reaches the
+    warehouse or an LLM provider.
+
+    The descriptions on the eight document tools are a pinned prompt surface
+    (see `test_the_mcp_tool_descriptions_are_a_pinned_prompt_surface`).
+    Annotations and argument descriptions are not: the benchmark prompt is
+    built from each tool's name, argument names and types, and description.
+    """
+    from mcp.types import ToolAnnotations
+
+    return ToolAnnotations(readOnlyHint=read_only, destructiveHint=destructive,
+                           idempotentHint=idempotent, openWorldHint=open_world)
+
+
 def _answer(session: Session, query) -> str:
     """Run a query function against the loaded layer, or say why you cannot.
 
@@ -525,7 +554,7 @@ def _register_session_tools(srv, session: Session) -> None:
     are about the SESSION, where the eight below are about a document.
     """
 
-    @srv.tool()
+    @srv.tool(annotations=_hints(read_only=True))
     def status() -> str:
         """What this server has, what it can see, and what to do next.
 
@@ -534,12 +563,18 @@ def _register_session_tools(srv, session: Session) -> None:
         how many claims nobody has reviewed yet), the warehouse connections
         visible from this machine, and a `next` field saying what to do --
         including when there is no layer at all, which is the state a fresh
-        install is in.
+        install is in. Read-only: it opens no warehouse connection and
+        changes nothing.
         """
         return json.dumps(session.status(), default=str)
 
-    @srv.tool()
-    def discover_connections(requested: str = "") -> str:
+    @srv.tool(annotations=_hints(read_only=True))
+    def discover_connections(
+        requested: Annotated[str, Field(description=(
+            "The warehouse the user named, in their own words, when it is not "
+            "in the list: 'databricks', 'redshift', 'our iceberg tables in "
+            "s3'. Omit it to list what is reachable."))] = "",
+    ) -> str:
         """Which warehouses are reachable from this machine, by name.
 
         Reads DuckDB files in the working directory, warehouse environment
@@ -561,14 +596,21 @@ def _register_session_tools(srv, session: Session) -> None:
             return json.dumps(session.route(requested), default=str)
         return json.dumps(session.discover(), default=str)
 
-    @srv.tool()
-    def load_layer(ref: str) -> str:
+    @srv.tool(annotations=_hints(read_only=False))
+    def load_layer(
+        ref: Annotated[str, Field(description=(
+            "A `ref` from `status.layers`, the connection the layer was built "
+            "for, or a path to a layer file."))],
+    ) -> str:
         """Load one of the layers `status` listed under `layers`.
 
         ref: the `ref` from that list, the connection it is for, or a path to
         a layer file. Returns the new status. Use it when several layers are
         on this machine and the user has said which warehouse they mean --
-        and after it, tell them which one you loaded.
+        and after it, tell them which one you loaded. It replaces the layer
+        this session answers from and leaves every file as it was; a ref that
+        cannot be loaded comes back as status with an `error`, which still
+        lists `layers`.
         """
         return json.dumps(session.load_layer(ref), default=str)
 
@@ -635,10 +677,24 @@ def _register_answer_tools(srv, session: Session) -> None:
     that touch the warehouse.
     """
 
-    @srv.tool()
-    async def infer(connection: str = "", question: str = "", scope: str = "",
-                    wait_seconds: int = 25, use_llm: bool = True,
-                    ctx: Context | None = None) -> str:
+    @srv.tool(annotations=_hints(read_only=False, idempotent=False,
+                                 open_world=True))
+    async def infer(
+        connection: Annotated[str, Field(description=(
+            "A uri from `status.connections`, or one the user gave. Omit it "
+            "to use the session's."))] = "",
+        question: Annotated[str, Field(description=(
+            "What the user actually asked, kept so `status` can remind you "
+            "to answer it when the layer is ready."))] = "",
+        scope: Annotated[str, Field(description=(
+            "Schema names, comma-separated, to model only those."))] = "",
+        wait_seconds: Annotated[int, Field(description=(
+            "How long to hold this call open, in seconds. Capped at 60."))] = 25,
+        use_llm: Annotated[bool, Field(description=(
+            "False for a statistics-only layer: no descriptions, no LLM "
+            "cost, much faster."))] = True,
+        ctx: Context | None = None,
+    ) -> str:
         """Build the semantic layer for a warehouse. Ask the user first.
 
         This READS THEIR WAREHOUSE -- metadata and sample values -- under the
@@ -673,13 +729,23 @@ def _register_answer_tools(srv, session: Session) -> None:
         return json.dumps(session.after_infer(job, session.target() or ""),
                           default=str)
 
-    @srv.tool()
+    @srv.tool(annotations=_hints(read_only=False))
     def cancel_infer() -> str:
-        """Stop the inference that is running. Takes effect at the next stage."""
+        """Stop the inference that is running. Takes effect at the next stage.
+
+        Call it when the user asks to stop a run `infer` started. It returns
+        immediately with `cancelling`, because a run cannot be interrupted
+        mid-stage; call `status` to see it end. With no run going it changes
+        nothing and returns status with an `error` saying so.
+        """
         return json.dumps(session.cancel_infer(), default=str)
 
-    @srv.tool()
-    def context_for_question(question: str) -> str:
+    @srv.tool(annotations=_hints(read_only=True))
+    def context_for_question(
+        question: Annotated[str, Field(description=(
+            "The user's question in their own words, as plain language and "
+            "not SQL: 'what was net revenue by region last quarter'."))],
+    ) -> str:
         """START EVERY QUESTION ABOUT THE USER'S DATA HERE.
 
         Including when you are not sure a layer is loaded: if none is, this
@@ -698,8 +764,12 @@ def _register_answer_tools(srv, session: Session) -> None:
         """
         return _answer(session, lambda doc: agent_context(doc, question, session))
 
-    @srv.tool()
-    def run_sql(sql: str) -> str:
+    @srv.tool(annotations=_hints(read_only=True, open_world=True))
+    def run_sql(
+        sql: Annotated[str, Field(description=(
+            "One SELECT statement, in the dialect of the session's "
+            "warehouse. It is run exactly as written."))],
+    ) -> str:
         """Run ONE read-only SELECT against the session's warehouse.
 
         `check_sql` runs first and an error means the SQL is NOT executed --
@@ -731,32 +801,81 @@ def _register_review_tools(srv, session: Session) -> None:
     export_layer -- to wherever the user asked.
     """
 
-    @srv.tool()
-    def review_questions(tables: str = "", limit: int = 20) -> str:
-        """What is uncertain in this layer, as questions you can answer.
+    @srv.tool(annotations=_hints(read_only=True))
+    def review_questions(
+        tables: Annotated[str, Field(description=(
+            "Table names, comma-separated, to list only the questions that "
+            "touch them. Omit for the whole layer."))] = "",
+        limit: Annotated[int, Field(description=(
+            "The most questions to return. `truncated` in the result says "
+            "whether there were more."))] = 20,
+    ) -> str:
+        """List the open review questions in the loaded layer.
 
-        Pull this when the user asks what is unreviewed or unreliable. Do
+        What is uncertain in this layer, as questions you can answer. Pull
+        this when the user asks what is unreviewed or unreliable. Do
         NOT walk the user through it after inference: the questions that
         matter are the ones an answer rested on, and `run_sql` hands you
         those as `assumptions`.
 
         tables: comma-separated, to scope it to what you are looking at.
+        limit: the most to return; `truncated` says whether there were more.
+
+        Read-only. Each question carries its `key`, the claim, what the
+        engine saw, and who may decide it. `review_question` gives one in
+        full, `review_answer` records a verdict, and `review_decisions` lists
+        the ones already given.
         """
         from semlayer import agent_review
         names = [t.strip() for t in tables.split(",") if t.strip()]
         return _answer(session, lambda doc: agent_review.questions(
             doc, names or None, limit))
 
-    @srv.tool()
-    def review_question(key: str) -> str:
-        """One question in full: every object it covers, and the evidence."""
+    @srv.tool(annotations=_hints(read_only=True))
+    def review_question(
+        key: Annotated[str, Field(description=(
+            "The `key` of an open question, exactly as `review_questions` "
+            "returned it."))],
+    ) -> str:
+        """Fetch one open review question in full, by its key.
+
+        Call it after `review_questions` and before `review_answer`, or
+        before putting a question to the user. It adds what the list leaves
+        out: every object the question covers, each with where it is, the
+        claim and the evidence; what accepting or rejecting would change;
+        the shape a `set:` verdict takes; and who may decide.
+
+        Read-only. A key that is not in the queue returns an `error` and
+        what to do next -- an answered question has left the queue, which is
+        usually what happened.
+        """
         from semlayer import agent_review
         return _answer(session, lambda doc: agent_review.question(doc, key))
 
-    @srv.tool()
-    def review_answer(key: str, verdict: str, decided_by: str,
-                      by: str = "", exclude: str = "", note: str = "") -> str:
+    @srv.tool(annotations=_hints(read_only=False))
+    def review_answer(
+        key: Annotated[str, Field(description=(
+            "The `key` of the open question being decided, exactly as "
+            "`review_questions` returned it."))],
+        verdict: Annotated[str, Field(description=(
+            "`accept`, `reject`, or `set:<value>`. `review_question` gives "
+            "the shape `set` takes."))],
+        decided_by: Annotated[str, Field(description=(
+            "`agent` if the decision is yours, `person` if the user made "
+            "it. Never guess."))],
+        by: Annotated[str, Field(description=(
+            "The name to record: what the person told you, or something "
+            "recognisable for yourself such as `claude-code/opus`."))] = "",
+        exclude: Annotated[str, Field(description=(
+            "Object locations the verdict should skip, comma-separated: the "
+            "`where` values from `review_question`."))] = "",
+        note: Annotated[str, Field(description=(
+            "Your reasoning, kept on the question whether or not the "
+            "verdict was recorded."))] = "",
+    ) -> str:
         """Record a verdict. Takes effect immediately, and says who decided.
+
+        key: the question's `key`, from `review_questions`.
 
         verdict: `accept`, `reject`, or `set:<value>` -- `review_question`
         gives the shape `set` takes.
@@ -785,23 +904,36 @@ def _register_review_tools(srv, session: Session) -> None:
             key, verdict, decided_by, by=by or None, exclude=skip or None,
             note=note or None), default=str)
 
-    @srv.tool()
+    @srv.tool(annotations=_hints(read_only=True))
     def review_decisions() -> str:
-        """Every verdict in this layer and who stands behind each one.
+        """List every verdict recorded in the loaded layer, and who made it.
 
-        Read `signal`: `agent` means nobody has confirmed it. Say so when an
-        answer rests on one.
+        Call it when the user asks what has been decided or by whom, or to
+        check what an answer rests on. Each row has the verdict, where it
+        applies, the date, the name recorded and a `signal`. Read `signal`:
+        `agent` means nobody has confirmed it. Say so when an answer rests
+        on one.
+
+        Read-only, and it covers the whole layer the session has loaded. For
+        what is still undecided, call `review_questions`.
         """
         from semlayer import agent_review
         return _answer(session, agent_review.decisions)
 
-    @srv.tool()
-    def save_layer(path: str) -> str:
+    @srv.tool(annotations=_hints(read_only=False, destructive=True))
+    def save_layer(
+        path: Annotated[str, Field(description=(
+            "Where to write the layer file, as the user chose it: for "
+            "example `semantic/layer.yaml` in their repository. `~` is "
+            "expanded and missing folders are created."))],
+    ) -> str:
         """Write the layer into the user's project so their team has it.
 
         The cache is per-machine; a file in the repository is what a
         colleague reads. From then on this session's verdicts land there.
-        Ask where they want it rather than choosing for them.
+        Ask where they want it rather than choosing for them. A file already
+        at that path is replaced; a path that cannot be written comes back
+        as `saved: false` with the reason.
 
         Refused on a set: a hub and its members are several files the user
         already chose the paths for, and one file cannot hold them.
@@ -810,10 +942,16 @@ def _register_review_tools(srv, session: Session) -> None:
             return json.dumps(session.status(), default=str)
         return json.dumps(session.save_layer(path), default=str)
 
-    @srv.tool()
-    def export_layer(target: str, path: str) -> str:
+    @srv.tool(annotations=_hints(read_only=False, destructive=True))
+    def export_layer(
+        target: Annotated[str, Field(description=(
+            "The format to write. `dbt` is the only one today."))],
+        path: Annotated[str, Field(description=(
+            "Where to write the export, as the user chose it."))],
+    ) -> str:
         """Write a snapshot of the layer in another tool's format.
 
+        path: where the user wants it written.
         target: `dbt` today. On request only, and lossy -- the result says
         what the format could not carry. Nothing keeps it in step with the
         layer afterwards and you must keep answering from the layer, never
@@ -961,38 +1099,70 @@ def build_server(layer: Session | dict):
         """The optional walkthrough, for someone who asks to be set up."""
         return _SETUP
 
-    @srv.tool()
-    def semantic_search(query: str) -> str:
+    @srv.tool(annotations=_hints(read_only=True))
+    def semantic_search(
+        query: Annotated[str, Field(description=(
+            "Keywords or a short phrase, such as 'refunds by region'. "
+            "Matched on stemmed words, with abbreviations expanded, against "
+            "the names and descriptions of tables, columns and metrics; it "
+            "is not an embedding search. The best matches come back ranked, "
+            "canonical tables above staging and deprecated ones."))],
+    ) -> str:
         """Search tables, columns, and metrics by keywords. The starting point."""
         return _answer(session, lambda doc: search(doc, query))
 
-    @srv.tool()
+    @srv.tool(annotations=_hints(read_only=True))
     def get_domains() -> str:
         """List warehouse domains (table groupings) for navigation."""
         return _answer(session, list_domains)
 
-    @srv.tool()
-    def get_tables(domain: str = "") -> str:
+    @srv.tool(annotations=_hints(read_only=True))
+    def get_tables(
+        domain: Annotated[str, Field(description=(
+            "A domain `name` exactly as `get_domains` returned it, to list "
+            "only its tables. Omit to list every table in the layer."))] = "",
+    ) -> str:
         """List table summaries, optionally within a domain."""
         return _answer(session, lambda doc: list_tables(doc, domain or None))
 
-    @srv.tool()
-    def table_detail(name: str) -> str:
+    @srv.tool(annotations=_hints(read_only=True))
+    def table_detail(
+        name: Annotated[str, Field(description=(
+            "The table's `name` exactly as `get_tables`, `semantic_search` "
+            "or `context_for_question` returned it. A name that is unknown, "
+            "or that inference skipped, returns an explanation and not an "
+            "error."))],
+    ) -> str:
         """Full detail for one table: columns, keys, relationships, REQUIRED FILTERS."""
         return _answer(session, lambda doc: get_table(doc, name))
 
-    @srv.tool()
+    @srv.tool(annotations=_hints(read_only=True))
     def get_metrics() -> str:
         """List defined metrics (name, measure, aggregation, filter)."""
         return _answer(session, list_metrics)
 
-    @srv.tool()
-    def route_intent(intent: str) -> str:
+    @srv.tool(annotations=_hints(read_only=True))
+    def route_intent(
+        intent: Annotated[str, Field(description=(
+            "What the user wants to measure, in a few plain words, such as "
+            "'monthly revenue by region'. Matched by word overlap against "
+            "the layer's routing entries, and the five closest come back. "
+            "Each names the tables to `use`; an `aggregates` list holds "
+            "summary tables that are offered with a caveat and are not for "
+            "automatic use."))],
+    ) -> str:
         """Which tables to use (and avoid) for an analytical intent."""
         return _answer(session, lambda doc: routing(doc, intent))
 
-    @srv.tool()
-    def check_sql(sql: str, dialect: str = "duckdb") -> str:
+    @srv.tool(annotations=_hints(read_only=True))
+    def check_sql(
+        sql: Annotated[str, Field(description=(
+            "The statement to check, exactly as it would be run."))],
+        dialect: Annotated[str, Field(description=(
+            "The SQL dialect the statement is written in, by its sqlglot "
+            "name: `duckdb`, `snowflake`, `bigquery`, `postgres`. An "
+            "unknown name is reported as a finding."))] = "duckdb",
+    ) -> str:
         """Lint SQL against the semantic layer BEFORE it runs ANYWHERE.
 
         Including SQL you intend to execute with a tool that is not
@@ -1010,11 +1180,35 @@ def build_server(layer: Session | dict):
         return _answer(session, lambda doc: without_positions(
             lint_sql(doc, sql, dialect=dialect)))
 
-    @srv.tool()
-    def compile_metric(name: str, group_by: str = "", time_grain: str = "",  # noqa: PLR0913, PLR0917 — tool schema is intentionally flat
-                       time_start: str = "", time_end: str = "",
-                       filter: str = "", dialect: str = "duckdb",
-                       calendar: str = "", scd: str = "") -> str:
+    @srv.tool(annotations=_hints(read_only=True))
+    def compile_metric(  # noqa: PLR0913, PLR0917 — tool schema is intentionally flat
+        name: Annotated[str, Field(description=(
+            "A metric `name` exactly as `get_metrics` returned it."))],
+        group_by: Annotated[str, Field(description=(
+            "Columns to group by, comma-separated. A refusal lists the "
+            "legal alternatives."))] = "",
+        time_grain: Annotated[str, Field(description=(
+            "`day`, `week`, `month`, `quarter` or `year`. Omit for no time "
+            "bucketing."))] = "",
+        time_start: Annotated[str, Field(description=(
+            "Inclusive lower bound on the metric's date column, as a date "
+            "such as `2026-01-01`."))] = "",
+        time_end: Annotated[str, Field(description=(
+            "Exclusive upper bound on the metric's date column, as a date "
+            "such as `2026-04-01`."))] = "",
+        filter: Annotated[str, Field(description=(
+            "An extra SQL predicate added to the WHERE clause, on top of "
+            "the metric's own filters."))] = "",
+        dialect: Annotated[str, Field(description=(
+            "The SQL dialect to compile to, by its sqlglot name: `duckdb`, "
+            "`snowflake`, `bigquery`, `postgres`."))] = "duckdb",
+        calendar: Annotated[str, Field(description=(
+            "`fiscal` or `calendar`. Required for quarter and year grains "
+            "when the date dimension carries a verified fiscal calendar."))] = "",
+        scd: Annotated[str, Field(description=(
+            "`current` or `asof`. Required when the join path crosses a "
+            "history table."))] = "",
+    ) -> str:
         """Compile a metric to correct SQL (joins, filters, time bucketing).
 
         group_by: comma-separated columns. On refusal the response lists
