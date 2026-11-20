@@ -38,7 +38,7 @@ jobs:
       run:
         working-directory: extension
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -102,7 +102,7 @@ jobs:
       id-token: write   # trusted publishing (OIDC) — no tokens anywhere
       contents: write   # attach the .mcpb bundle to the release
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
